@@ -183,6 +183,7 @@ class TestMpassProxyLogin(IntegrationTestCase):
 	settings = MpassSettings(auth_type="SSO", default_email_domain="foss.local", corporate_id=CORPORATE_ID)
 
 	def setUp(self):
+		super().setUp()
 		frappe.set_user("Administrator")
 		for user in (self.jane, self.bob, "1020010000019120@foss.local"):
 			frappe.delete_doc_if_exists("User", user, force=True)
@@ -191,6 +192,7 @@ class TestMpassProxyLogin(IntegrationTestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 		frappe.set_user("Administrator")
+		super().tearDown()
 
 	def start_request(self, email: str | None = None, token: str | None = None, **extra_headers):
 		headers = {ACCESS_TOKEN_HEADER: token or corporate_token(), **extra_headers}
@@ -326,6 +328,17 @@ class ReachedAuthenticate(Exception):
 
 
 class TestMpassBreakGlass(IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		system_setting = frappe.get_system_settings
+
+		def password_login_disabled(key):
+			return 1 if key == "disable_user_pass_login" else system_setting(key)
+
+		disabled = patch.object(frappe, "get_system_settings", side_effect=password_login_disabled)
+		disabled.start()
+		self.addCleanup(disabled.stop)
+
 	def attempt_password_login(self, usr: str, auth_type: str):
 		set_request(method="POST", path="/api/method/login")
 		frappe.local.form_dict = frappe._dict(usr=usr, pwd="irrelevant")
@@ -333,7 +346,6 @@ class TestMpassBreakGlass(IntegrationTestCase):
 		with (
 			patch.dict(os.environ, {"AUTH_TYPE": auth_type}),
 			patch.object(LoginManager, "authenticate", side_effect=ReachedAuthenticate),
-			self.change_settings("System Settings", {"disable_user_pass_login": 1}),
 		):
 			login_manager.login()
 
