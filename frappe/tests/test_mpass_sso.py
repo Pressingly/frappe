@@ -31,10 +31,18 @@ from frappe.mpass_sso import (
 	resolve_email,
 )
 from frappe.tests import IntegrationTestCase, UnitTestCase
-from frappe.utils import set_request
+from frappe.tests.test_api import FrappeAPITestCase, make_request
+from frappe.utils import get_test_client, set_request
 
 CORPORATE_ID = "corp-123"
 EDGE_SECRET = "s" * 40
+PORTAL_URL = "https://portal.example.com/"
+SSO_ENV = {
+	"AUTH_TYPE": "SSO",
+	"DEFAULT_EMAIL_DOMAIN": "foss.local",
+	"SMB_CORPORATE_ID": CORPORATE_ID,
+	"LOGOUT_REDIRECT_URL": PORTAL_URL,
+}
 
 
 def jwt(claims: dict) -> str:
@@ -44,6 +52,21 @@ def jwt(claims: dict) -> str:
 
 def corporate_token(corporate_id: str = CORPORATE_ID) -> str:
 	return jwt({"custom:is_corporate": "true", "custom:corporate_id": corporate_id})
+
+
+def raw_jwt(payload: bytes) -> str:
+	return f"header.{base64.urlsafe_b64encode(payload).rstrip(b'=').decode()}.signature"
+
+
+def purge_test_users(*emails: str) -> None:
+	"""SSO logins commit, so test users, their sessions and the member role outlive rollbacks."""
+	frappe.set_user("Administrator")
+	for email in emails:
+		frappe.db.delete("Sessions", {"user": email})
+		frappe.delete_doc_if_exists("User", email, force=True)
+	if not frappe.db.exists("Has Role", {"role": MEMBER_ROLE}):
+		frappe.delete_doc_if_exists("Role", MEMBER_ROLE, force=True)
+	frappe.db.commit()
 
 
 class TestMpassIdentityHelpers(UnitTestCase):
@@ -108,6 +131,8 @@ class TestMpassIdentityHelpers(UnitTestCase):
 		self.assertIsNone(decode_jwt_payload("a..c"))
 		self.assertIsNone(decode_jwt_payload("a.!!!.c"))
 		self.assertIsNone(decode_jwt_payload(jwt(["a"])))
+		self.assertIsNone(decode_jwt_payload(jwt({"pad": "x" * 9000})))
+		self.assertIsNone(decode_jwt_payload(raw_jwt(b"[" * 5000)))
 
 	def test_corporate_ok(self):
 		bound = MpassSettings(corporate_id=CORPORATE_ID)
@@ -171,10 +196,12 @@ class TestMpassIdentityHelpers(UnitTestCase):
 		def request(method="GET", **headers):
 			return SimpleNamespace(method=method, headers=headers)
 
-		self.assertTrue(inspects_request(request()))
-		self.assertFalse(inspects_request(request("OPTIONS")))
-		self.assertFalse(inspects_request(request(Authorization="token a:b")))
-		self.assertFalse(inspects_request(None))
+		self.assertTrue(inspects_request(request(), "Guest"))
+		self.assertTrue(inspects_request(request(), "jane@example.com"))
+		self.assertFalse(inspects_request(request("OPTIONS"), "Guest"))
+		self.assertFalse(inspects_request(request(Authorization="token a:b"), "Guest"))
+		self.assertTrue(inspects_request(request(Authorization="x"), "jane@example.com"))
+		self.assertFalse(inspects_request(None, "Guest"))
 
 
 class TestMpassProxyLogin(IntegrationTestCase):
@@ -193,6 +220,11 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		frappe.db.rollback()
 		frappe.set_user("Administrator")
 		super().tearDown()
+
+	@classmethod
+	def tearDownClass(cls):
+		purge_test_users(cls.jane, cls.bob, "1020010000019120@foss.local")
+		super().tearDownClass()
 
 	def start_request(self, email: str | None = None, token: str | None = None, **extra_headers):
 		headers = {ACCESS_TOKEN_HEADER: token or corporate_token(), **extra_headers}
@@ -215,6 +247,7 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		self.assertEqual(user.send_welcome_email, 0)
 		self.assertEqual([r.role for r in user.roles], [MEMBER_ROLE])
 		self.assertNotIn("message", frappe.local.response)
+		self.assertTrue(frappe.session.data.csrf_token)
 
 	def test_bare_mpass_id_uses_default_domain(self):
 		self.apply(self.start_request("1020010000019120"))
@@ -305,11 +338,28 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		login_manager.login_as(self.jane)
 		sid = frappe.session.sid
 
-		with self.assertRaises(MpassRefusalError):
+		frappe.local.message_log = []
+		with self.assertRaises(MpassRefusalError) as refusal:
 			self.apply(login_manager)
 
 		self.assertEqual(frappe.session.user, "Guest")
 		self.assertFalse(frappe.db.exists("Sessions", {"sid": sid}))
+		for key in ("message", "home_page", "full_name"):
+			self.assertNotIn(key, frappe.local.response)
+		self.assertIn(
+			refusal.exception.page_message, [entry.get("message") for entry in frappe.local.message_log]
+		)
+
+	def test_authorization_header_does_not_shield_a_cookie_session(self):
+		self.apply(self.start_request(self.jane))
+		login_manager = self.start_request(self.jane, token=corporate_token("other"), Authorization="x")
+		login_manager.login_as(self.jane)
+
+		with self.assertRaises(MpassRefusalError) as refusal:
+			self.apply(login_manager)
+
+		self.assertEqual(refusal.exception.reason, Outcome.CORPORATE)
+		self.assertEqual(frappe.session.user, "Guest")
 
 	def test_requests_left_alone(self):
 		edge_gated = MpassSettings(auth_type="SSO", corporate_id=CORPORATE_ID, edge_secret=EDGE_SECRET)
@@ -383,3 +433,76 @@ class TestMpassBreakGlass(IntegrationTestCase):
 			return
 		with patch.dict(os.environ, {"AUTH_TYPE": ""}), self.assertRaises(frappe.ValidationError):
 			settings.validate_user_pass_login()
+
+
+class TestMpassHTTPRequest(FrappeAPITestCase):
+	user = "mpass-http@example.com"
+
+	def setUp(self):
+		super().setUp()
+		sso = patch.dict(os.environ, SSO_ENV)
+		sso.start()
+		self.addCleanup(sso.stop)
+		self.client = get_test_client()
+
+	@classmethod
+	def tearDownClass(cls):
+		purge_test_users(cls.user)
+		super().tearDownClass()
+
+	def send(self, method: str, path: str, headers: dict | None = None, **kwargs):
+		target = getattr(self.client, method)
+		return make_request(target=target, args=(path,), kwargs={"headers": headers or {}, **kwargs})
+
+	def identity(self, corporate_id: str = CORPORATE_ID) -> dict:
+		return {EMAIL_HEADER: self.user, ACCESS_TOKEN_HEADER: corporate_token(corporate_id)}
+
+	def test_get_creates_a_session_with_a_csrf_token(self):
+		response = self.send("get", "/api/method/frappe.auth.get_logged_user", self.identity())
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json["message"], self.user)
+		sid = self.client.get_cookie("sid").value
+		frappe.db.rollback()
+		session_data = json.loads(frappe.db.get_value("Sessions", {"sid": sid}, "sessiondata", order_by=None))
+		self.assertTrue(session_data.get("csrf_token"))
+
+	def test_unsafe_request_that_creates_the_session_fails_csrf(self):
+		if frappe.conf.ignore_csrf:
+			self.skipTest("ignore_csrf is set for this site")
+
+		response = self.send("post", "/api/method/frappe.auth.get_logged_user", self.identity())
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.json["exc_type"], "CSRFTokenError")
+
+	def test_refusal_page_explains_the_mpass_refusal(self):
+		response = self.send("get", "/desk", {**self.identity("other"), "Accept": "text/html"})
+
+		self.assertEqual(response.status_code, 403)
+		self.assertIn("Your mPass identity is not allowed", response.get_data(as_text=True))
+
+	def test_web_logout_redirects_to_the_portal(self):
+		response = self.send("post", "/api/method/web_logout")
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.headers["Location"], PORTAL_URL)
+
+	def test_guest_login_page_redirects_to_the_portal(self):
+		response = self.send("get", "/login")
+
+		self.assertEqual(response.status_code, 302)
+		self.assertEqual(response.headers["Location"], PORTAL_URL)
+
+	def test_local_credential_endpoints_are_refused(self):
+		for method, path, payload in (
+			("post", "/api/method/frappe.core.doctype.user.user.reset_password", {"user": self.user}),
+			("post", "/api/method/frappe.core.doctype.user.user.update_password", {"new_password": "x"}),
+			("post", "/api/method/frappe.www.login.send_login_link", {"email": self.user}),
+			("get", "/api/method/frappe.www.login.login_via_key?key=x", None),
+			("get", "/update-password", None),
+		):
+			with self.subTest(path=path):
+				frappe.cache.delete_keys("rl:")
+				response = self.send(method, path, json=payload)
+				self.assertEqual(response.status_code, 403)
