@@ -17,7 +17,6 @@ from frappe.mpass_sso import (
 	MpassSettings,
 	Outcome,
 	admissible_role,
-	allows_password_login,
 	apply_proxy_identity,
 	asserted_identity,
 	corporate_ok,
@@ -173,14 +172,6 @@ class TestMpassIdentityHelpers(UnitTestCase):
 		):
 			with self.subTest(email=email, session_user=session_user, impersonated_by=impersonated_by):
 				self.assertEqual(decide(email, session_user, impersonated_by, admitted), expected)
-
-	def test_allows_password_login(self):
-		sso = MpassSettings(auth_type="SSO")
-		self.assertTrue(allows_password_login("Administrator", sso))
-		self.assertTrue(allows_password_login(" administrator ", sso))
-		self.assertFalse(allows_password_login("jane@example.com", sso))
-		self.assertFalse(allows_password_login(None, sso))
-		self.assertFalse(allows_password_login("Administrator", MpassSettings()))
 
 	def test_admissible_role(self):
 		member = {"name": MEMBER_ROLE, "disabled": 0, "desk_access": 1}
@@ -387,36 +378,73 @@ class ReachedAuthenticate(Exception):
 	pass
 
 
-class TestMpassBreakGlass(IntegrationTestCase):
-	def setUp(self):
-		super().setUp()
+class ReachedPastGuard(Exception):
+	pass
+
+
+class TestMpassPasswordLogin(IntegrationTestCase):
+	def attempt_password_login(self, usr: str, auth_type: str, password_login_disabled: int):
 		system_setting = frappe.get_system_settings
 
-		def password_login_disabled(key):
-			return 1 if key == "disable_user_pass_login" else system_setting(key)
+		def settings(key):
+			return password_login_disabled if key == "disable_user_pass_login" else system_setting(key)
 
-		disabled = patch.object(frappe, "get_system_settings", side_effect=password_login_disabled)
-		disabled.start()
-		self.addCleanup(disabled.stop)
-
-	def attempt_password_login(self, usr: str, auth_type: str):
 		set_request(method="POST", path="/api/method/login")
 		frappe.local.form_dict = frappe._dict(usr=usr, pwd="irrelevant")
 		login_manager = LoginManager.__new__(LoginManager)
 		with (
 			patch.dict(os.environ, {"AUTH_TYPE": auth_type}),
+			patch.object(frappe, "get_system_settings", side_effect=settings),
 			patch.object(LoginManager, "authenticate", side_effect=ReachedAuthenticate),
 		):
 			login_manager.login()
 
-	def test_administrator_password_login_survives_under_sso(self):
-		with self.assertRaises(ReachedAuthenticate):
-			self.attempt_password_login("Administrator", "SSO")
+	def test_every_password_login_is_refused_under_sso(self):
+		for usr in ("Administrator", "administrator", "jane@example.com"):
+			for password_login_disabled in (0, 1):
+				with (
+					self.subTest(usr=usr, password_login_disabled=password_login_disabled),
+					self.assertRaises(frappe.AuthenticationError),
+				):
+					self.attempt_password_login(usr, "SSO", password_login_disabled)
 
-	def test_other_password_logins_stay_disabled(self):
-		for usr, auth_type in (("jane@example.com", "SSO"), ("Administrator", ""), ("jane@example.com", "")):
-			with self.subTest(usr=usr, auth_type=auth_type), self.assertRaises(frappe.AuthenticationError):
-				self.attempt_password_login(usr, auth_type)
+	def test_password_login_is_upstream_without_sso(self):
+		for usr in ("Administrator", "jane@example.com"):
+			with self.subTest(usr=usr):
+				with self.assertRaises(ReachedAuthenticate):
+					self.attempt_password_login(usr, "", 0)
+				with self.assertRaises(frappe.AuthenticationError):
+					self.attempt_password_login(usr, "", 1)
+
+	def assert_refused_only_under_sso(self, call, past_the_guard: str):
+		with patch(past_the_guard, side_effect=ReachedPastGuard):
+			with patch.dict(os.environ, {"AUTH_TYPE": "SSO"}), self.assertRaises(frappe.PermissionError):
+				call()
+			with patch.dict(os.environ, {"AUTH_TYPE": ""}), self.assertRaises(ReachedPastGuard):
+				call()
+
+	def test_ldap_login_is_refused_only_under_sso(self):
+		from frappe.integrations.doctype.ldap_settings.ldap_settings import login
+
+		frappe.local.form_dict = frappe._dict(usr="jane", pwd="irrelevant")
+		self.assert_refused_only_under_sso(
+			login, "frappe.integrations.doctype.ldap_settings.ldap_settings.LDAPSettings.authenticate"
+		)
+
+	def test_social_login_is_refused_only_under_sso(self):
+		from frappe.utils.oauth import login_oauth_user
+
+		self.assert_refused_only_under_sso(
+			lambda: login_oauth_user({"email": "jane@example.com"}, provider="google", state="x"),
+			"frappe.utils.oauth.consume_oauth_state",
+		)
+
+	def test_invitation_acceptance_is_refused_only_under_sso(self):
+		from frappe.core.api.user_invitation import accept_invitation
+
+		self.assert_refused_only_under_sso(
+			lambda: accept_invitation("x"), "frappe.core.api.user_invitation._accept_invitation"
+		)
 
 	def test_system_settings_accept_disabled_password_login_under_sso(self):
 		settings = frappe.get_doc("System Settings")
@@ -500,6 +528,7 @@ class TestMpassHTTPRequest(FrappeAPITestCase):
 			("post", "/api/method/frappe.core.doctype.user.user.update_password", {"new_password": "x"}),
 			("post", "/api/method/frappe.www.login.send_login_link", {"email": self.user}),
 			("get", "/api/method/frappe.www.login.login_via_key?key=x", None),
+			("get", "/api/method/frappe.core.api.user_invitation.accept_invitation?key=x", None),
 			("get", "/update-password", None),
 		):
 			with self.subTest(path=path):

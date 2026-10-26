@@ -13,7 +13,7 @@ import frappe.utils.user
 from frappe import _
 from frappe.apps import get_default_path
 from frappe.core.doctype.activity_log.activity_log import add_authentication_log
-from frappe.mpass_sso import allows_password_login, apply_proxy_identity
+from frappe.mpass_sso import apply_proxy_identity, sso_enabled
 from frappe.sessions import Session, clear_sessions, delete_session, get_expiry_in_seconds
 from frappe.translate import get_language
 from frappe.twofactor import (
@@ -149,12 +149,10 @@ class LoginManager:
 	def login(self):
 		self.run_trigger("before_login")
 
-		user, pwd = get_cached_user_pass()
-		if frappe.get_system_settings("disable_user_pass_login") and not allows_password_login(
-			user or frappe.form_dict.get("usr")
-		):
+		if frappe.get_system_settings("disable_user_pass_login") or sso_enabled():
 			frappe.throw(_("Login with username and password is not allowed."), frappe.AuthenticationError)
 
+		user, pwd = get_cached_user_pass()
 		self.authenticate(user=user, pwd=pwd)
 		frappe.clear_cache(user=self.user)
 

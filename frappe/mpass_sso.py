@@ -30,7 +30,6 @@ PRIVILEGED_ROLES = frozenset(("System Manager", *AUTOMATIC_ROLES))
 MIN_EDGE_SECRET_LENGTH = 32
 MAX_EMAIL_LENGTH = 140
 MAX_TOKEN_PAYLOAD_LENGTH = 8192
-BREAK_GLASS_USER = "Administrator"
 LOGIN_RESPONSE_KEYS = ("message", "home_page", "full_name", "redirect_to", "session_expired")
 
 
@@ -208,15 +207,9 @@ def logout_redirect_url(settings: MpassSettings | None = None) -> str | None:
 	return url
 
 
-def allows_password_login(login_id: str | None, settings: MpassSettings | None = None) -> bool:
-	"""Under SSO, `disable_user_pass_login` still admits the Administrator password: the
-	break-glass account when mPass or the corporate binding is broken."""
-	settings = settings or MpassSettings.from_env()
-	return settings.sso_enabled and normalise(login_id) == normalise(BREAK_GLASS_USER)
-
-
 def guard_local_credentials() -> None:
-	"""Refuse a local-credential flow (password reset, email link, signup) under SSO."""
+	"""Refuse a sign-in flow other than mPass (password reset, email link, LDAP, social login,
+	invitation, signup) under SSO."""
 	if sso_enabled():
 		frappe.throw(_("Sign-in to this site is managed by mPass."), frappe.PermissionError)
 
