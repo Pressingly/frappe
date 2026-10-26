@@ -123,36 +123,29 @@ Refused with `403` ("Sign-in to this site is managed by mPass"):
 (a request that reached `/login` without an identity header) is redirected to
 `LOGOUT_REDIRECT_URL`, or gets a `403` when that is not set.
 
-**Password login and the Administrator break-glass.** The provisioning step sets System Settings
-`disable_user_pass_login = 1` (bundle side). Upstream, that setting can only be saved when a
-Social Login Key, LDAP or login-by-email-link is enabled; under SSO that validation is skipped,
-so the Setup Wizard and later admin edits of System Settings still save.
+**No password login under SSO, Administrator included.** `LoginManager.login` refuses every
+username/password login while `AUTH_TYPE=SSO` (`AuthenticationError`, "Login with username and
+password is not allowed."), whatever System Settings `disable_user_pass_login` says, so a site
+admin cannot switch password login back on from the desk. LDAP login
+(`frappe.integrations.doctype.ldap_settings.ldap_settings.login`) is refused too, and Frappe's
+OAuth2 provider has no password grant. Everyone, admins included, signs in through mPass; admin
+rights come from the bundle's provisioning script. With SSO off, password login is upstream's.
 
-With the setting on, `/api/method/login` refuses every password login except one: under SSO the
-login id `Administrator` (case-insensitive, not the Administrator's email) is still admitted, so
-the Administrator password stays a break-glass for when mPass or the corporate binding is
-broken. Keep that password strong and out of day-to-day use.
+The bundle may still set `disable_user_pass_login = 1` (it hides the password form on any page
+that reads it), but nothing depends on it. Upstream, that setting can only be saved when a Social
+Login Key, LDAP or login-by-email-link is enabled; under SSO that validation is skipped, so the
+setting can be written at site creation and the Setup Wizard and later admin edits of System
+Settings still save.
 
-The mPass header always wins: an Administrator session in a browser that carries an mPass
-identity is logged out and replaced by that identity on the next request, like any other
-session. The break-glass is therefore used without an identity header, in one of two ways:
+**Break-glass** is a shell on the backend container, never HTTP: when mPass or the corporate
+binding is broken, an operator with Docker access runs
 
-- **Internal host.** From a container on the backend network, log in and reuse the `sid`
-  cookie. Frappe resolves the site from the `Host` header, so send the site name in `Host` or
-  `X-Frappe-Site-Name`:
+```bash
+docker exec -it <erpnext-backend> bench --site <site> console
+```
 
-  ```bash
-  curl -c /tmp/admin.jar http://erpnext-backend:8000/api/method/login \
-    -H 'X-Frappe-Site-Name: erp.example.com' \
-    --data-urlencode usr=Administrator --data-urlencode pwd="$ADMIN_PASSWORD"
-  curl -b /tmp/admin.jar http://erpnext-backend:8000/api/method/frappe.auth.get_logged_user \
-    -H 'X-Frappe-Site-Name: erp.example.com'
-  ```
-
-- **bench console.** No HTTP and no password: `bench --site <site> console` on the backend
-  container runs as Administrator, e.g. to grant a role
-  (`frappe.get_doc("User", "<email>").add_roles("System Manager")`) or switch password login
-  back on (`frappe.db.set_single_value("System Settings", "disable_user_pass_login", 0)`).
+which runs as Administrator without a password, e.g. to grant a role
+(`frappe.get_doc("User", "<email>").add_roles("System Manager")`, then `frappe.db.commit()`).
 
 Not covered: a System Manager can still set another user's password from the User form
 (`change_password`); with password login disabled that password cannot be used.
@@ -228,7 +221,9 @@ curl http://erpnext-backend:8000/api/resource/Customer \
 - `TestMpassProxyLogin`: `apply_proxy_identity` against a site database (provisioning, CSRF token
   on new sessions, session switch, impersonation, refusals, `Authorization` with a cookie
   session, edge secret).
-- `TestMpassBreakGlass`: the Administrator password exemption and the System Settings validation.
+- `TestMpassPasswordLogin`: password login refused under SSO for everyone (Administrator
+  included, whatever `disable_user_pass_login` says), upstream behaviour without SSO, LDAP login
+  refused, and the System Settings validation.
 - `TestMpassHTTPRequest`: whole requests through `frappe.app.application` (session creation with a
   CSRF token, CSRF failure on the creating `POST`, the refusal page, `web_logout`, `/login` as
   Guest, the gated credential endpoints).
