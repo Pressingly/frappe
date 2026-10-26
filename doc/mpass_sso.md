@@ -116,6 +116,13 @@ Refused with `403` ("Sign-in to this site is managed by mPass"):
 - password update (`frappe.core.doctype.user.user.update_password`) and the `/update-password`
   page;
 - login by email link (`frappe.www.login.send_login_link`, `frappe.www.login.login_via_key`);
+- LDAP login (`frappe.integrations.doctype.ldap_settings.ldap_settings.login`);
+- social login through a Social Login Key (`frappe.utils.oauth.login_oauth_user`, reached from
+  every `frappe.integrations.oauth2_logins.login_via_<provider>` callback), which also leaves
+  `frappe.www.login.login_via_token` with no session to hand out;
+- user invitations (`frappe.core.api.user_invitation.accept_invitation`): accepting one would log
+  the invitee in by an emailed key, or send them to the gated `/update-password`. Roles come from
+  the bundle's provisioning script instead;
 - signup (`frappe.website.utils.is_signup_disabled` is true under SSO, which also hides the
   signup form and blocks social-login signup).
 
@@ -126,16 +133,18 @@ Refused with `403` ("Sign-in to this site is managed by mPass"):
 **No password login under SSO, Administrator included.** `LoginManager.login` refuses every
 username/password login while `AUTH_TYPE=SSO` (`AuthenticationError`, "Login with username and
 password is not allowed."), whatever System Settings `disable_user_pass_login` says, so a site
-admin cannot switch password login back on from the desk. LDAP login
-(`frappe.integrations.doctype.ldap_settings.ldap_settings.login`) is refused too, and Frappe's
-OAuth2 provider has no password grant. Everyone, admins included, signs in through mPass; admin
-rights come from the bundle's provisioning script. With SSO off, password login is upstream's.
+admin cannot switch password login back on from the desk. Together with the refused surfaces
+above (LDAP, social login, email links, invitations) and Frappe's OAuth2 provider having no
+password grant, everyone, admins included, signs in through mPass; admin rights come from the
+bundle's provisioning script. With SSO off, every one of these flows is upstream's.
 
-The bundle may still set `disable_user_pass_login = 1` (it hides the password form on any page
-that reads it), but nothing depends on it. Upstream, that setting can only be saved when a Social
-Login Key, LDAP or login-by-email-link is enabled; under SSO that validation is skipped, so the
-setting can be written at site creation and the Setup Wizard and later admin edits of System
-Settings still save.
+The bundle may still set `disable_user_pass_login = 1`. Password login does not depend on it under
+SSO, but upstream code reads it elsewhere: it hides the password form, and user invitations
+(refused under SSO anyway) use it to choose between logging the invitee in and sending them to
+set a password. Upstream, that setting can only be saved when a Social Login Key, LDAP or
+login-by-email-link is enabled; under SSO that validation is skipped, so the setting can be
+written at site creation and the Setup Wizard and later admin edits of System Settings still
+save.
 
 **Break-glass** is a shell on the backend container, never HTTP: when mPass or the corporate
 binding is broken, an operator with Docker access runs
@@ -222,8 +231,9 @@ curl http://erpnext-backend:8000/api/resource/Customer \
   on new sessions, session switch, impersonation, refusals, `Authorization` with a cookie
   session, edge secret).
 - `TestMpassPasswordLogin`: password login refused under SSO for everyone (Administrator
-  included, whatever `disable_user_pass_login` says), upstream behaviour without SSO, LDAP login
-  refused, and the System Settings validation.
+  included, whatever `disable_user_pass_login` says), upstream behaviour without SSO, LDAP and
+  social login and invitation acceptance refused under SSO only, and the System Settings
+  validation.
 - `TestMpassHTTPRequest`: whole requests through `frappe.app.application` (session creation with a
   CSRF token, CSRF failure on the creating `POST`, the refusal page, `web_logout`, `/login` as
   Guest, the gated credential endpoints).
