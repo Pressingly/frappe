@@ -29,6 +29,7 @@ MEMBER_ROLE = "mPass Member"
 PRIVILEGED_ROLES = frozenset(("System Manager", *AUTOMATIC_ROLES))
 MIN_EDGE_SECRET_LENGTH = 32
 MAX_EMAIL_LENGTH = 140
+MAX_TOKEN_PAYLOAD_LENGTH = 8192
 BREAK_GLASS_USER = "Administrator"
 LOGIN_RESPONSE_KEYS = ("message", "home_page", "full_name", "redirect_to", "session_expired")
 
@@ -46,7 +47,8 @@ class Outcome(StrEnum):
 
 class MpassRefusalError(frappe.PermissionError):
 	def __init__(self, reason: Outcome):
-		super().__init__(_("Your mPass identity is not allowed to sign in to this site."))
+		self.page_message = _("Your mPass identity is not allowed to sign in to this site.")
+		super().__init__(self.page_message)
 		self.reason = reason
 
 
@@ -132,13 +134,13 @@ def decode_jwt_payload(token: str | None) -> dict | None:
 	"""The access token's claims, decoded WITHOUT verification: oauth2-proxy has already
 	validated the token it forwards."""
 	parts = (token or "").strip().split(".")
-	if len(parts) != 3 or not parts[1]:
+	if len(parts) != 3 or not parts[1] or len(parts[1]) > MAX_TOKEN_PAYLOAD_LENGTH:
 		return None
 
 	segment = parts[1] + "=" * (-len(parts[1]) % 4)
 	try:
 		claims = json.loads(base64.b64decode(segment, altchars=b"-_", validate=True))
-	except (ValueError, binascii.Error):
+	except (ValueError, binascii.Error, RecursionError):
 		return None
 
 	return claims if isinstance(claims, dict) else None
@@ -185,9 +187,13 @@ def admissible_role(role: Mapping | None) -> bool:
 	)
 
 
-def inspects_request(request) -> bool:
-	"""Token-authenticated calls and CORS preflights are left to Frappe's own auth."""
-	return bool(request) and request.method != "OPTIONS" and not request.headers.get("Authorization")
+def inspects_request(request, session_user: str | None) -> bool:
+	"""CORS preflights are left alone, and so is an `Authorization` header on a request with no
+	resumed session, where token auth carries the identity. With a cookie session the header proves
+	nothing: Frappe ignores a malformed one and keeps the session."""
+	if not request or request.method == "OPTIONS":
+		return False
+	return not (request.headers.get("Authorization") and session_user == "Guest")
 
 
 def logout_redirect_url(settings: MpassSettings | None = None) -> str | None:
@@ -218,7 +224,7 @@ def guard_local_credentials() -> None:
 def apply_proxy_identity(login_manager, settings: MpassSettings | None = None) -> None:
 	"""Bind the Frappe session to the identity oauth2-proxy asserts for this request."""
 	settings = settings or MpassSettings.from_env()
-	if not settings.sso_enabled or not inspects_request(frappe.request):
+	if not settings.sso_enabled or not inspects_request(frappe.request, frappe.session.user):
 		return
 
 	headers = frappe.request.headers
@@ -320,8 +326,20 @@ def switch_session(login_manager, user: str) -> None:
 		end_session(login_manager, reason="mPass identity changed")
 
 	login_manager.login_as(user)
+	issue_csrf_token()
 	frappe.db.commit()
+	drop_login_response_keys()
 
+
+def issue_csrf_token() -> None:
+	"""Frappe skips the CSRF check while a session has no token, and this session was created by
+	the very request it serves: without a token now, an unsafe request carrying only the mPass
+	cookie would run unchecked."""
+	frappe.local.session.data.csrf_token = frappe.generate_hash()
+	frappe.local.session_obj.update(force=True)
+
+
+def drop_login_response_keys() -> None:
 	for key in LOGIN_RESPONSE_KEYS:
 		frappe.local.response.pop(key, None)
 
@@ -338,6 +356,8 @@ def refuse(login_manager, reason: Outcome) -> NoReturn:
 	if frappe.session.user != "Guest":
 		login_manager.logout()
 		frappe.db.commit()
+		drop_login_response_keys()
 
 	frappe.flags.disable_traceback = True
-	raise MpassRefusalError(reason)
+	refusal = MpassRefusalError(reason)
+	frappe.throw(refusal.page_message, refusal, title=_("Not Permitted"))
