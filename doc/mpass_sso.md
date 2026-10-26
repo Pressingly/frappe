@@ -30,20 +30,31 @@ Evaluated per request, in this order:
 | Request | Result |
 |---|---|
 | `AUTH_TYPE` is not `SSO` | Nothing (upstream behaviour) |
-| `OPTIONS`, or an `Authorization` header is present | Nothing: API key/secret, bearer and basic auth stay with Frappe's own `validate_auth` |
+| `OPTIONS` | Nothing |
+| An `Authorization` header and no resumed session (Guest) | Nothing: API key/secret, bearer and basic auth stay with Frappe's own `validate_auth` |
+| An `Authorization` header on a request that resumed a cookie session | Evaluated like any other request: Frappe ignores a malformed header (`Authorization: x`) and keeps the cookie session, so the header must not shield that session from the checks below |
 | `MPASS_EDGE_SECRET` is set and the request does not carry it | Nothing: the identity header is ignored and the current session is kept |
-| `X-Auth-Request-Email` absent or blank | Nothing: absence is not a logout signal (internal traffic, the socket.io server's calls) |
+| `X-Auth-Request-Email` absent or blank | Nothing: absence is not a logout signal (internal traffic, and the socket.io server's calls, which never pass through the gate; see the bypass list) |
 | Identity cannot be resolved (see Provisioning) | `403`, any non-Guest session ended |
 | Corporate check fails (see Configuration) | `403`, any non-Guest session ended. Checked on every request, so a revoked binding takes effect without waiting for the session to expire |
 | Identity equals the session user | Nothing |
 | Identity equals the session's `impersonated_by` | Nothing: an admin impersonating someone keeps that session |
-| Session is Guest | User resolved or created, then logged in (`LoginManager.login_as`) and committed |
-| Session belongs to someone else | That session is deleted (`on_logout` hooks run), then the new user is logged in |
+| Session is Guest | User resolved or created, then logged in (`LoginManager.login_as`), given a CSRF token and committed |
+| Session belongs to someone else | That session is deleted (`on_logout` hooks run), then the new user is logged in as above |
 | Resolved user is `Administrator` or `Guest`, or is disabled | `403`, any non-Guest session ended, no user created |
 
-A refusal is a `frappe.PermissionError` subclass (`MpassRefusalError`, with a `reason`), so the
-browser gets Frappe's `403` page and JSON callers a `403` body. The reason is logged to the
-`mpass_sso` logger.
+A refusal is a `frappe.PermissionError` subclass (`MpassRefusalError`, with a `reason`). The
+browser gets Frappe's `403` page with "Your mPass identity is not allowed to sign in to this site."
+(`handle_exception` shows the exception's `page_message`), and JSON callers a `403` body carrying
+the same text in `_server_messages`. The reason is logged to the `mpass_sso` logger.
+
+**CSRF on the request that creates the session.** Frappe skips its CSRF check while a session has
+no token. A session this hook creates belongs to the request that triggered it, so it is given a
+token at once: an unsafe request (`POST`, `PUT`, `PATCH`, `DELETE`) that arrives with only the
+mPass cookie, for example a form posted from another subdomain of the platform domain where the
+`SameSite=Lax` oauth2-proxy cookie is still sent, fails with `CSRFTokenError` instead of running.
+The cost: a desk tab whose Frappe session expired gets a CSRF error on its next save and must
+reload, rather than saving into the new session.
 
 ## Configuration
 
@@ -168,7 +179,7 @@ Recommended for the bundle routers. Everything not listed stays behind `mpass-au
 | Path | Why public |
 |---|---|
 | `/assets/*` | Static bundles, served before any session logic |
-| `/socket.io/*` | Realtime websocket; the socket.io server authenticates by the `sid` cookie through Frappe, so a stale or missing session is simply anonymous |
+| `/socket.io/*` | Realtime websocket. The socket.io server authenticates by the `sid` cookie only, by calling Frappe over the internal network without identity headers, so realtime never passes the mPass gate or the corporate check. It relies on the Frappe session and its expiry: a refused or logged-out session stops realtime, but a user removed from the tenant keeps receiving realtime events until their Frappe session is next refused on a gated request or expires. See the session-expiry recommendation under Trade-offs |
 | `/files/*` | Frappe's public files, public by upstream design (email images, print logos). Private files are `/private/files/*` and stay protected |
 | `/favicon.ico`, `/robots.txt` | Static |
 
@@ -178,8 +189,8 @@ Keep `strip-auth-headers` on every router, bypass routers included.
 
 Under SSO the API is internal-only on the public host, the platform standard: `/api/*` is behind
 `mpass-auth`. Token callers (an MCP server, integrations) use the internal network with an API
-key and secret, which Frappe authenticates itself (the SSO hook skips any request with an
-`Authorization` header). Frappe resolves the site from the `Host` header, so internal calls send
+key and secret, which Frappe authenticates itself (the SSO hook leaves a request with an
+`Authorization` header and no cookie session to Frappe's token auth). Frappe resolves the site from the `Host` header, so internal calls send
 `Host: <site name>` or `X-Frappe-Site-Name: <site name>`:
 
 ```bash
@@ -201,7 +212,11 @@ curl http://erpnext-backend:8000/api/resource/Customer \
   email is refused rather than logged in as Administrator. Give Administrator an address no mPass
   user has.
 - **No idle timeout of its own.** Frappe's session expiry still applies; once it lapses, the next
-  request with an identity header starts a new session.
+  request with an identity header starts a new session. Because realtime (`/socket.io`) is gated
+  only by that session, keep System Settings `session_expiry` short under SSO (for example
+  `06:00`, against the upstream default of `240:00` hours of inactivity). The next gated request
+  creates a new session from the identity header, so the cost is small: an open desk tab whose
+  session lapsed reloads once (see CSRF above).
 
 ## Tests
 
@@ -210,6 +225,13 @@ curl http://erpnext-backend:8000/api/resource/Customer \
 - `TestMpassIdentityHelpers`: the pure helpers (settings, normalisation, email shape, bare-id
   resolution, edge secret, JWT payload decode, corporate check, portal URL, role admissibility)
   and the decision table.
-- `TestMpassProxyLogin`: `apply_proxy_identity` against a site database (provisioning, session
-  switch, impersonation, refusals, edge secret). Needs a bench site:
-  `bench --site <site> run-tests --module frappe.tests.test_mpass_sso`.
+- `TestMpassProxyLogin`: `apply_proxy_identity` against a site database (provisioning, CSRF token
+  on new sessions, session switch, impersonation, refusals, `Authorization` with a cookie
+  session, edge secret).
+- `TestMpassBreakGlass`: the Administrator password exemption and the System Settings validation.
+- `TestMpassHTTPRequest`: whole requests through `frappe.app.application` (session creation with a
+  CSRF token, CSRF failure on the creating `POST`, the refusal page, `web_logout`, `/login` as
+  Guest, the gated credential endpoints).
+
+The database and HTTP classes need a bench site and clean up the users, sessions and role they
+commit: `bench --site <site> run-tests --module frappe.tests.test_mpass_sso`.
