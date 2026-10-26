@@ -452,6 +452,10 @@ frappe.Application = class Application {
 		);
 	}
 	redirect_to_login() {
+		if (this.logged_out && frappe.boot.mpass_logout_url) {
+			window.location.href = frappe.boot.mpass_logout_url;
+			return;
+		}
 		window.location.href = `/login?redirect-to=${encodeURIComponent(
 			window.location.pathname + window.location.search
 		)}`;

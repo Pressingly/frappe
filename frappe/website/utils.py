@@ -174,6 +174,7 @@ def get_home_page_via_hooks():
 def get_boot_data():
 	from frappe.integrations.frappe_providers.frappecloud_billing import is_fc_site
 	from frappe.locale import get_date_format, get_first_day_of_the_week, get_number_format, get_time_format
+	from frappe.mpass_sso import logout_redirect_url
 
 	apps = get_apps()
 
@@ -202,6 +203,7 @@ def get_boot_data():
 		"assets_json": get_assets_json(),
 		"sitename": frappe.local.site,
 		"is_fc_site": 1 if is_fc_site() else 0,
+		"mpass_logout_url": logout_redirect_url(),
 	}
 
 
