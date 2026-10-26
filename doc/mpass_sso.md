@@ -30,7 +30,6 @@ Evaluated per request, in this order:
 | Request | Result |
 |---|---|
 | `AUTH_TYPE` is not `SSO` | Nothing (upstream behaviour) |
-| Session belongs to `Administrator` | Nothing: a break-glass session (see below) is never displaced by the browser's mPass identity |
 | `OPTIONS`, or an `Authorization` header is present | Nothing: API key/secret, bearer and basic auth stay with Frappe's own `validate_auth` |
 | `MPASS_EDGE_SECRET` is set and the request does not carry it | Nothing: the identity header is ignored and the current session is kept |
 | `X-Auth-Request-Email` absent or blank | Nothing: absence is not a logout signal (internal traffic, the socket.io server's calls) |
@@ -121,11 +120,28 @@ so the Setup Wizard and later admin edits of System Settings still save.
 With the setting on, `/api/method/login` refuses every password login except one: under SSO the
 login id `Administrator` (case-insensitive, not the Administrator's email) is still admitted, so
 the Administrator password stays a break-glass for when mPass or the corporate binding is
-broken. The `/login` form is never shown under SSO, so the break-glass is a direct
-`POST /api/method/login` (`usr=Administrator`, `pwd=...`), through the public host (which needs an
-mPass session) or the internal network. The resulting Administrator session is kept even when
-the browser carries a different mPass identity, until it logs out or expires. Keep the
-Administrator password strong and out of day-to-day use.
+broken. Keep that password strong and out of day-to-day use.
+
+The mPass header always wins: an Administrator session in a browser that carries an mPass
+identity is logged out and replaced by that identity on the next request, like any other
+session. The break-glass is therefore used without an identity header, in one of two ways:
+
+- **Internal host.** From a container on the backend network, log in and reuse the `sid`
+  cookie. Frappe resolves the site from the `Host` header, so send the site name in `Host` or
+  `X-Frappe-Site-Name`:
+
+  ```bash
+  curl -c /tmp/admin.jar http://erpnext-backend:8000/api/method/login \
+    -H 'X-Frappe-Site-Name: erp.example.com' \
+    --data-urlencode usr=Administrator --data-urlencode pwd="$ADMIN_PASSWORD"
+  curl -b /tmp/admin.jar http://erpnext-backend:8000/api/method/frappe.auth.get_logged_user \
+    -H 'X-Frappe-Site-Name: erp.example.com'
+  ```
+
+- **bench console.** No HTTP and no password: `bench --site <site> console` on the backend
+  container runs as Administrator, e.g. to grant a role
+  (`frappe.get_doc("User", "<email>").add_roles("System Manager")`) or switch password login
+  back on (`frappe.db.set_single_value("System Settings", "disable_user_pass_login", 0)`).
 
 Not covered: a System Manager can still set another user's password from the User form
 (`change_password`); with password login disabled that password cannot be used.
@@ -177,8 +193,10 @@ curl http://erpnext-backend:8000/api/resource/Customer \
   `MPASS_ALLOW_ANY_TENANT=1`, the same as Mautic. An empty variable silently admitting the whole
   Cognito pool is the easy mistake.
 - **User creation is throttled.** Frappe refuses to create more than `throttle_user_limit` users
-  per hour (default 60, `site_config.json`). A first-day rollout to a larger team must raise it,
-  or the 61st first login gets an error page until the hour rolls over.
+  in any 60-minute window (default 60, set in `site_config.json`). SSO provisions a user on each
+  first login, so a first-day rollout to a larger team must raise it (for example
+  `bench --site <site> set-config throttle_user_limit 500`), or every first login past the limit
+  gets an error page until the window rolls over.
 - **Administrator's email is locked out of SSO.** An mPass identity equal to the Administrator's
   email is refused rather than logged in as Administrator. Give Administrator an address no mPass
   user has.
