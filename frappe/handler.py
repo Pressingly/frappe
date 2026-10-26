@@ -118,8 +118,15 @@ def logout():
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def web_logout():
+	from frappe.mpass_sso import logout_redirect_url
+
 	frappe.local.login_manager.logout()
 	frappe.db.commit()
+	if portal := logout_redirect_url():
+		frappe.local.response["type"] = "redirect"
+		frappe.local.response["location"] = portal
+		return
+
 	frappe.respond_as_web_page(
 		_("Logged Out"), _("You have been successfully logged out"), indicator_color="green"
 	)
