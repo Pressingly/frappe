@@ -179,7 +179,7 @@ Recommended for the bundle routers. Everything not listed stays behind `mpass-au
 | Path | Why public |
 |---|---|
 | `/assets/*` | Static bundles, served before any session logic |
-| `/socket.io/*` | Realtime websocket. The socket.io server authenticates by the `sid` cookie only, by calling Frappe over the internal network without identity headers, so realtime never passes the mPass gate or the corporate check. It relies on the Frappe session and its expiry: a refused or logged-out session stops realtime, but a user removed from the tenant keeps receiving realtime events until their Frappe session is next refused on a gated request or expires. See the session-expiry recommendation under Trade-offs |
+| `/socket.io/*` | Realtime websocket. The socket.io server authenticates by the `sid` cookie only, by calling Frappe over the internal network without identity headers, so realtime never passes the mPass gate or the corporate check. It relies on the Frappe session and its expiry: a refused or logged-out session blocks new realtime connections and subscriptions, but a socket that is already open keeps receiving events for the rooms it joined until it disconnects, and a user removed from the tenant keeps connecting until their Frappe session is next refused on a gated request or expires. See the session-expiry recommendation under Trade-offs |
 | `/files/*` | Frappe's public files, public by upstream design (email images, print logos). Private files are `/private/files/*` and stay protected |
 | `/favicon.ico`, `/robots.txt` | Static |
 
