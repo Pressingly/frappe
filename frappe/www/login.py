@@ -10,6 +10,7 @@ from frappe import _
 from frappe.apps import get_default_path
 from frappe.auth import LoginManager
 from frappe.core.doctype.navbar_settings.navbar_settings import get_app_logo
+from frappe.mpass_sso import guard_local_credentials, logout_redirect_url, sso_enabled
 from frappe.rate_limiter import rate_limit
 from frappe.utils import cint, get_request_host, get_url
 from frappe.utils.data import escape_html
@@ -39,6 +40,9 @@ def get_context(context):
 		if redirect_to != "login":
 			frappe.local.flags.redirect_location = redirect_to
 			raise frappe.Redirect
+
+	if sso_enabled():
+		send_guest_to_portal()
 
 	context.no_header = True
 	context.for_test = "login.html"
@@ -116,6 +120,16 @@ def get_context(context):
 	return context
 
 
+def send_guest_to_portal():
+	"""Under mPass SSO a guest reaching /login carried no identity header: sign-in happens at the
+	portal, never through a local form."""
+	if portal := logout_redirect_url():
+		frappe.local.flags.redirect_location = portal
+		raise frappe.Redirect
+
+	frappe.throw(_("Sign in through the mPass portal."), frappe.PermissionError)
+
+
 @frappe.whitelist(allow_guest=True)
 def login_via_token(login_token: str):
 	sid = frappe.cache.get_value(f"login_token:{login_token}", expires=True)
@@ -138,6 +152,8 @@ def get_login_with_email_link_ratelimit() -> int:
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 @rate_limit(limit=get_login_with_email_link_ratelimit, seconds=60 * 60)
 def send_login_link(email: str):
+	guard_local_credentials()
+
 	if not frappe.get_system_settings("login_with_email_link"):
 		return
 
@@ -184,6 +200,8 @@ def _generate_temporary_login_link(email: str, expiry: int):
 @frappe.whitelist(allow_guest=True, methods=["GET"])
 @rate_limit(limit=get_login_with_email_link_ratelimit, seconds=60 * 60)
 def login_via_key(key: str):
+	guard_local_credentials()
+
 	cache_key = f"one_time_login_key:{key}"
 	email = frappe.cache.get_value(cache_key)
 

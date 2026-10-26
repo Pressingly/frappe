@@ -206,7 +206,9 @@ def get_boot_data():
 
 
 def is_signup_disabled():
-	return frappe.get_website_settings("disable_signup")
+	from frappe.mpass_sso import sso_enabled
+
+	return sso_enabled() or frappe.get_website_settings("disable_signup")
 
 
 def cleanup_page_name(title: str) -> str:
