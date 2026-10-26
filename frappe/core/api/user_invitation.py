@@ -78,6 +78,9 @@ def get_allowed_invite_params(app_name: str, kwargs: dict) -> dict:
 
 @frappe.whitelist(allow_guest=True, methods=["GET"])
 def accept_invitation(key: str) -> None:
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
 	_accept_invitation(key, False)
 
 

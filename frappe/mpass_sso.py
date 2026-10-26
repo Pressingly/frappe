@@ -208,7 +208,8 @@ def logout_redirect_url(settings: MpassSettings | None = None) -> str | None:
 
 
 def guard_local_credentials() -> None:
-	"""Refuse a local-credential flow (password reset, email link, LDAP, signup) under SSO."""
+	"""Refuse a sign-in flow other than mPass (password reset, email link, LDAP, social login,
+	invitation, signup) under SSO."""
 	if sso_enabled():
 		frappe.throw(_("Sign-in to this site is managed by mPass."), frappe.PermissionError)
 

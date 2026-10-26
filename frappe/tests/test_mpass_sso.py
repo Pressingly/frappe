@@ -378,6 +378,10 @@ class ReachedAuthenticate(Exception):
 	pass
 
 
+class ReachedPastGuard(Exception):
+	pass
+
+
 class TestMpassPasswordLogin(IntegrationTestCase):
 	def attempt_password_login(self, usr: str, auth_type: str, password_login_disabled: int):
 		system_setting = frappe.get_system_settings
@@ -412,12 +416,35 @@ class TestMpassPasswordLogin(IntegrationTestCase):
 				with self.assertRaises(frappe.AuthenticationError):
 					self.attempt_password_login(usr, "", 1)
 
-	def test_ldap_login_is_refused_under_sso(self):
+	def assert_refused_only_under_sso(self, call, past_the_guard: str):
+		with patch(past_the_guard, side_effect=ReachedPastGuard):
+			with patch.dict(os.environ, {"AUTH_TYPE": "SSO"}), self.assertRaises(frappe.PermissionError):
+				call()
+			with patch.dict(os.environ, {"AUTH_TYPE": ""}), self.assertRaises(ReachedPastGuard):
+				call()
+
+	def test_ldap_login_is_refused_only_under_sso(self):
 		from frappe.integrations.doctype.ldap_settings.ldap_settings import login
 
 		frappe.local.form_dict = frappe._dict(usr="jane", pwd="irrelevant")
-		with patch.dict(os.environ, {"AUTH_TYPE": "SSO"}), self.assertRaises(frappe.PermissionError):
-			login()
+		self.assert_refused_only_under_sso(
+			login, "frappe.integrations.doctype.ldap_settings.ldap_settings.LDAPSettings.authenticate"
+		)
+
+	def test_social_login_is_refused_only_under_sso(self):
+		from frappe.utils.oauth import login_oauth_user
+
+		self.assert_refused_only_under_sso(
+			lambda: login_oauth_user({"email": "jane@example.com"}, provider="google", state="x"),
+			"frappe.utils.oauth.consume_oauth_state",
+		)
+
+	def test_invitation_acceptance_is_refused_only_under_sso(self):
+		from frappe.core.api.user_invitation import accept_invitation
+
+		self.assert_refused_only_under_sso(
+			lambda: accept_invitation("x"), "frappe.core.api.user_invitation._accept_invitation"
+		)
 
 	def test_system_settings_accept_disabled_password_login_under_sso(self):
 		settings = frappe.get_doc("System Settings")
@@ -501,6 +528,7 @@ class TestMpassHTTPRequest(FrappeAPITestCase):
 			("post", "/api/method/frappe.core.doctype.user.user.update_password", {"new_password": "x"}),
 			("post", "/api/method/frappe.www.login.send_login_link", {"email": self.user}),
 			("get", "/api/method/frappe.www.login.login_via_key?key=x", None),
+			("get", "/api/method/frappe.core.api.user_invitation.accept_invitation?key=x", None),
 			("get", "/update-password", None),
 		):
 			with self.subTest(path=path):

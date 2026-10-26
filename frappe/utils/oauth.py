@@ -222,6 +222,10 @@ def login_oauth_user(
 	state: str,
 	generate_login_token: bool = False,
 ):
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
+
 	if isinstance(data, str):
 		data = json.loads(data)
 
