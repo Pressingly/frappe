@@ -142,9 +142,9 @@ class TestMpassIdentityHelpers(UnitTestCase):
 			(jane, "Guest", None, True, Outcome.LOGIN),
 			(jane, "bob@example.com", None, True, Outcome.LOGIN),
 			(jane, "bob@example.com", "carol@example.com", True, Outcome.LOGIN),
-			(jane, "Administrator", None, True, Outcome.KEEP),
-			(jane, "Administrator", None, False, Outcome.KEEP),
-			(None, "Administrator", None, True, Outcome.KEEP),
+			(jane, "Administrator", None, True, Outcome.LOGIN),
+			(jane, "Administrator", None, False, Outcome.CORPORATE),
+			(None, "Administrator", None, True, Outcome.UNRESOLVABLE),
 		):
 			with self.subTest(email=email, session_user=session_user, impersonated_by=impersonated_by):
 				self.assertEqual(decide(email, session_user, impersonated_by, admitted), expected)
@@ -240,6 +240,16 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		self.assertNotEqual(frappe.session.sid, old_sid)
 		self.assertFalse(frappe.db.exists("Sessions", {"sid": old_sid}))
 		self.assertNotIn("sid", frappe.local.cookie_manager.to_delete)
+
+	def test_administrator_session_is_replaced_by_the_asserted_user(self):
+		login_manager = self.start_request(self.jane)
+		login_manager.login_as("Administrator")
+		admin_sid = frappe.session.sid
+
+		self.apply(login_manager)
+
+		self.assertEqual(frappe.session.user, self.jane)
+		self.assertFalse(frappe.db.exists("Sessions", {"sid": admin_sid}))
 
 	def test_impersonation_by_asserted_user_is_kept(self):
 		self.apply(self.start_request(self.bob))

@@ -166,11 +166,7 @@ def portal_url(value: str | None) -> str | None:
 def decide(
 	email: str | None, session_user: str | None, impersonated_by: str | None, corporate_admitted: bool
 ) -> Outcome:
-	"""The identity decision for one request that carries an asserted identity. A break-glass
-	Administrator session was opened with the Administrator password, so the edge identity of the
-	browser it runs in does not displace it."""
-	if session_user == BREAK_GLASS_USER:
-		return Outcome.KEEP
+	"""The identity decision for one request that carries an asserted identity."""
 	if email is None:
 		return Outcome.UNRESOLVABLE
 	if not corporate_admitted:
