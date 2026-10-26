@@ -29,7 +29,8 @@ MEMBER_ROLE = "mPass Member"
 PRIVILEGED_ROLES = frozenset(("System Manager", *AUTOMATIC_ROLES))
 MIN_EDGE_SECRET_LENGTH = 32
 MAX_EMAIL_LENGTH = 140
-LOGIN_RESPONSE_KEYS = ("message", "home_page", "full_name", "redirect_to")
+BREAK_GLASS_USER = "Administrator"
+LOGIN_RESPONSE_KEYS = ("message", "home_page", "full_name", "redirect_to", "session_expired")
 
 
 class Outcome(StrEnum):
@@ -165,7 +166,11 @@ def portal_url(value: str | None) -> str | None:
 def decide(
 	email: str | None, session_user: str | None, impersonated_by: str | None, corporate_admitted: bool
 ) -> Outcome:
-	"""The identity decision for one request that carries an asserted identity."""
+	"""The identity decision for one request that carries an asserted identity. A break-glass
+	Administrator session was opened with the Administrator password, so the edge identity of the
+	browser it runs in does not displace it."""
+	if session_user == BREAK_GLASS_USER:
+		return Outcome.KEEP
 	if email is None:
 		return Outcome.UNRESOLVABLE
 	if not corporate_admitted:
@@ -199,6 +204,13 @@ def logout_redirect_url(settings: MpassSettings | None = None) -> str | None:
 	if not url:
 		frappe.logger("mpass_sso").warning("LOGOUT_REDIRECT_URL is not an absolute http(s) URL")
 	return url
+
+
+def allows_password_login(login_id: str | None, settings: MpassSettings | None = None) -> bool:
+	"""Under SSO, `disable_user_pass_login` still admits the Administrator password: the
+	break-glass account when mPass or the corporate binding is broken."""
+	settings = settings or MpassSettings.from_env()
+	return settings.sso_enabled and normalise(login_id) == normalise(BREAK_GLASS_USER)
 
 
 def guard_local_credentials() -> None:

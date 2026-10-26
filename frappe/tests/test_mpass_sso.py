@@ -2,7 +2,9 @@
 # License: MIT. See LICENSE
 import base64
 import json
+import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import frappe
 from frappe.auth import CookieManager, LoginManager
@@ -15,6 +17,7 @@ from frappe.mpass_sso import (
 	MpassSettings,
 	Outcome,
 	admissible_role,
+	allows_password_login,
 	apply_proxy_identity,
 	asserted_identity,
 	corporate_ok,
@@ -139,9 +142,20 @@ class TestMpassIdentityHelpers(UnitTestCase):
 			(jane, "Guest", None, True, Outcome.LOGIN),
 			(jane, "bob@example.com", None, True, Outcome.LOGIN),
 			(jane, "bob@example.com", "carol@example.com", True, Outcome.LOGIN),
+			(jane, "Administrator", None, True, Outcome.KEEP),
+			(jane, "Administrator", None, False, Outcome.KEEP),
+			(None, "Administrator", None, True, Outcome.KEEP),
 		):
 			with self.subTest(email=email, session_user=session_user, impersonated_by=impersonated_by):
 				self.assertEqual(decide(email, session_user, impersonated_by, admitted), expected)
+
+	def test_allows_password_login(self):
+		sso = MpassSettings(auth_type="SSO")
+		self.assertTrue(allows_password_login("Administrator", sso))
+		self.assertTrue(allows_password_login(" administrator ", sso))
+		self.assertFalse(allows_password_login("jane@example.com", sso))
+		self.assertFalse(allows_password_login(None, sso))
+		self.assertFalse(allows_password_login("Administrator", MpassSettings()))
 
 	def test_admissible_role(self):
 		member = {"name": MEMBER_ROLE, "disabled": 0, "desk_access": 1}
@@ -169,9 +183,10 @@ class TestMpassProxyLogin(IntegrationTestCase):
 	settings = MpassSettings(auth_type="SSO", default_email_domain="foss.local", corporate_id=CORPORATE_ID)
 
 	def setUp(self):
-		frappe.set_user("Guest")
+		frappe.set_user("Administrator")
 		for user in (self.jane, self.bob, "1020010000019120@foss.local"):
 			frappe.delete_doc_if_exists("User", user, force=True)
+		frappe.set_user("Guest")
 
 	def tearDown(self):
 		frappe.db.rollback()
@@ -304,3 +319,45 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		settings = MpassSettings(auth_type="SSO", corporate_id=CORPORATE_ID, edge_secret=EDGE_SECRET)
 		self.apply(self.start_request(self.jane, **{EDGE_SECRET_HEADER: EDGE_SECRET}), settings)
 		self.assertEqual(frappe.session.user, self.jane)
+
+
+class ReachedAuthenticate(Exception):
+	pass
+
+
+class TestMpassBreakGlass(IntegrationTestCase):
+	def attempt_password_login(self, usr: str, auth_type: str):
+		set_request(method="POST", path="/api/method/login")
+		frappe.local.form_dict = frappe._dict(usr=usr, pwd="irrelevant")
+		login_manager = LoginManager.__new__(LoginManager)
+		with (
+			patch.dict(os.environ, {"AUTH_TYPE": auth_type}),
+			patch.object(LoginManager, "authenticate", side_effect=ReachedAuthenticate),
+			self.change_settings("System Settings", {"disable_user_pass_login": 1}),
+		):
+			login_manager.login()
+
+	def test_administrator_password_login_survives_under_sso(self):
+		with self.assertRaises(ReachedAuthenticate):
+			self.attempt_password_login("Administrator", "SSO")
+
+	def test_other_password_logins_stay_disabled(self):
+		for usr, auth_type in (("jane@example.com", "SSO"), ("Administrator", ""), ("jane@example.com", "")):
+			with self.subTest(usr=usr, auth_type=auth_type), self.assertRaises(frappe.AuthenticationError):
+				self.attempt_password_login(usr, auth_type)
+
+	def test_system_settings_accept_disabled_password_login_under_sso(self):
+		settings = frappe.get_doc("System Settings")
+		settings.disable_user_pass_login = 1
+		settings.login_with_email_link = 0
+
+		with patch.dict(os.environ, {"AUTH_TYPE": "SSO"}):
+			settings.validate_user_pass_login()
+
+		has_other_login = frappe.db.exists(
+			"Social Login Key", {"enable_social_login": 1}
+		) or frappe.db.get_single_value("LDAP Settings", "enabled")
+		if has_other_login:
+			return
+		with patch.dict(os.environ, {"AUTH_TYPE": ""}), self.assertRaises(frappe.ValidationError):
+			settings.validate_user_pass_login()

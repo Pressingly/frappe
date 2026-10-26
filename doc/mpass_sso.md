@@ -30,6 +30,7 @@ Evaluated per request, in this order:
 | Request | Result |
 |---|---|
 | `AUTH_TYPE` is not `SSO` | Nothing (upstream behaviour) |
+| Session belongs to `Administrator` | Nothing: a break-glass session (see below) is never displaced by the browser's mPass identity |
 | `OPTIONS`, or an `Authorization` header is present | Nothing: API key/secret, bearer and basic auth stay with Frappe's own `validate_auth` |
 | `MPASS_EDGE_SECRET` is set and the request does not carry it | Nothing: the identity header is ignored and the current session is kept |
 | `X-Auth-Request-Email` absent or blank | Nothing: absence is not a logout signal (internal traffic, the socket.io server's calls) |
@@ -112,13 +113,22 @@ Refused with `403` ("Sign-in to this site is managed by mPass"):
 (a request that reached `/login` without an identity header) is redirected to
 `LOGOUT_REDIRECT_URL`, or gets a `403` when that is not set.
 
-**Password login is not gated in code.** The provisioning step sets System Settings
-`disable_user_pass_login = 1` (bundle side), which makes `/api/method/login` refuse every password
-login, Administrator's included. Administrator is break-glass only if an operator deliberately
-turns that setting off again (`bench --site <site> set-config` is not enough; it is a System
-Settings field, e.g. `frappe.db.set_single_value("System Settings", "disable_user_pass_login", 0)`
-from `bench console`). Not covered: a System Manager can still set another user's password from
-the User form (`change_password`); with password login disabled that password cannot be used.
+**Password login and the Administrator break-glass.** The provisioning step sets System Settings
+`disable_user_pass_login = 1` (bundle side). Upstream, that setting can only be saved when a
+Social Login Key, LDAP or login-by-email-link is enabled; under SSO that validation is skipped,
+so the Setup Wizard and later admin edits of System Settings still save.
+
+With the setting on, `/api/method/login` refuses every password login except one: under SSO the
+login id `Administrator` (case-insensitive, not the Administrator's email) is still admitted, so
+the Administrator password stays a break-glass for when mPass or the corporate binding is
+broken. The `/login` form is never shown under SSO, so the break-glass is a direct
+`POST /api/method/login` (`usr=Administrator`, `pwd=...`), through the public host (which needs an
+mPass session) or the internal network. The resulting Administrator session is kept even when
+the browser carries a different mPass identity, until it logs out or expires. Keep the
+Administrator password strong and out of day-to-day use.
+
+Not covered: a System Manager can still set another user's password from the User form
+(`change_password`); with password login disabled that password cannot be used.
 
 ## Logout
 
