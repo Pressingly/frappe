@@ -125,7 +125,7 @@ def send_guest_to_portal():
 	portal, never through a local form."""
 	if portal := logout_redirect_url():
 		frappe.local.flags.redirect_location = portal
-		raise frappe.Redirect
+		raise frappe.Redirect(302)
 
 	frappe.throw(_("Sign in through the mPass portal."), frappe.PermissionError)
 
