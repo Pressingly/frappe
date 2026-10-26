@@ -403,6 +403,10 @@ class LDAPSettings(Document):
 
 @frappe.whitelist(allow_guest=True)
 def login():
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
+
 	# LDAP LOGIN LOGIC
 	args = frappe.form_dict
 	ldap: LDAPSettings = frappe.get_doc("LDAP Settings")
