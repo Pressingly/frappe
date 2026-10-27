@@ -184,6 +184,7 @@ frappe.router = {
 			frappe.set_route(["setup-wizard"]);
 		}
 		if (this.re_route(sub_path)) return;
+		if (this.open_landing_route(sub_path)) return;
 
 		// Read before the parse, which may wait on a doctype, by which time `set_route` has
 		// already cleared the flags.
@@ -481,6 +482,17 @@ frappe.router = {
 				frappe.views.pageview.show(route_name);
 			}
 		}
+	},
+
+	// The desk root opens the default app's home when the server resolved one this user may open.
+	// The apps screen stays at /desk/desktop. Replaced, not pushed, so Back does not bounce here.
+	open_landing_route(sub_path) {
+		const landing_route = frappe.boot.apps_data?.landing_route;
+		if (sub_path || !landing_route || !frappe.boot.setup_complete) return false;
+
+		frappe.route_flags.replace_route = true;
+		frappe.set_route(landing_route);
+		return true;
 	},
 
 	re_route(sub_path) {

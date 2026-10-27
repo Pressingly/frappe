@@ -2,6 +2,7 @@
 # License: MIT. See LICENSE
 
 import re
+from urllib.parse import unquote
 
 import frappe
 from frappe import _
@@ -14,6 +15,7 @@ from frappe.utils.caching import request_cache
 
 # check if route is /desk or /desk/* and not /app1 or /app1/*
 DESK_APP_PATTERN = re.compile(r"^/desk(/.*)?$")
+DESK_PAGE_ROUTE = re.compile(r"^/desk/(?P<page>[^/?#]+)/?$")
 
 
 @request_cache
@@ -96,18 +98,71 @@ def get_default_path():
 	if len(_apps) == 0:
 		return None
 
-	system_default_app = frappe.get_system_settings("default_app")
-	user_default_app = frappe.get_cached_value("User", frappe.session.user, "default_app")
-	if system_default_app and not user_default_app:
-		return get_route(system_default_app)
-	elif user_default_app:
-		return get_route(user_default_app)
+	if default_app := get_default_app():
+		return get_route(default_app)
 
 	if len(_apps) == 1:
 		return _apps[0].get("route") or "/desk"
 	elif is_desk_apps(_apps):
 		return "/desk"
 	return "/apps"
+
+
+def get_default_app() -> str | None:
+	return frappe.get_cached_value("User", frappe.session.user, "default_app") or frappe.get_system_settings(
+		"default_app"
+	)
+
+
+def get_desk_landing_route() -> str | None:
+	"""The route `/desk` opens instead of the apps screen: the default app's home, once setup is
+	complete and only when the user may open it. `None` keeps the apps screen."""
+	if not frappe.is_setup_complete():
+		return None
+
+	route = get_permitted_app_route(get_default_app())
+	return route if route and is_permitted_desk_page(route) else None
+
+
+def get_permitted_app_route(app_name: str | None) -> str | None:
+	"""The app's route, if `get_apps` (and so the app's `has_permission` hook) lets the user see it."""
+	return next((app["route"] for app in get_apps() if app["name"] == app_name), None)
+
+
+def is_permitted_desk_page(route: str) -> bool:
+	"""Whether `route` names one workspace or page the desk shows this user, and, for a workspace,
+	one with something on it for them.
+
+	Workspace roles alone are too loose: ERPNext's Home only asks for `Desk User`, which every desk
+	user has, and is empty for one whose roles reach none of its links."""
+	from frappe.desk.desk_views import DeskViews
+
+	match = DESK_PAGE_ROUTE.match(route)
+	if not match:
+		return False
+
+	name = unquote(match["page"])
+	if workspace := get_permitted_workspace(name):
+		return has_content(workspace)
+	return name in DeskViews.get_allowed_pages(cache=True)
+
+
+def get_permitted_workspace(route_name: str) -> dict | None:
+	from frappe.desk.desktop import get_workspaces
+	from frappe.desk.utils import slug
+
+	return next((page for page in get_workspaces()["pages"] if slug(page.name) == route_name), None)
+
+
+def has_content(workspace: dict) -> bool:
+	from frappe.desk.desktop import get_desktop_page
+
+	try:
+		blocks = get_desktop_page(frappe.as_json(workspace))
+	except Exception:
+		frappe.log_error(f"Failed to build workspace {workspace.name} for the desk landing route")
+		return False
+	return any(block.get("items") for block in blocks.values())
 
 
 @frappe.whitelist()

@@ -237,7 +237,7 @@ frappe.ui.SidebarHeader = class SidebarHeader {
 			name: "all-apps",
 			label: __("All apps"),
 			icon: "grid-2x2",
-			href: "/desk",
+			href: "/desk/desktop",
 		};
 	}
 

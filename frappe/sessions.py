@@ -17,7 +17,7 @@ import frappe
 import frappe.translate
 import frappe.utils
 from frappe import _
-from frappe.apps import get_apps, get_default_path, is_desk_apps
+from frappe.apps import get_apps, get_default_path, get_desk_landing_route, is_desk_apps
 from frappe.cache_manager import clear_user_cache, reset_metadata_version
 from frappe.database import savepoint
 from frappe.query_builder import Order
@@ -181,6 +181,7 @@ def get():
 		"apps": get_apps() or [],
 		"is_desk_apps": 1 if bool(is_desk_apps(get_apps())) else 0,
 		"default_path": get_default_path() or "",
+		"landing_route": get_desk_landing_route() or "",
 	}
 
 	bootinfo["desk_theme"] = frappe.get_cached_value("User", frappe.session.user, "desk_theme") or "Light"
