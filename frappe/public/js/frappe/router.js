@@ -184,6 +184,7 @@ frappe.router = {
 			frappe.set_route(["setup-wizard"]);
 		}
 		if (this.re_route(sub_path)) return;
+		if (this.open_landing_route(sub_path)) return;
 
 		// Read before the parse, which may wait on a doctype, by which time `set_route` has
 		// already cleared the flags.
@@ -483,6 +484,27 @@ frappe.router = {
 		}
 	},
 
+	// The desk root opens the default app's home when the server resolved one this user may open
+	// and the desk can resolve it too. The apps screen stays at /desk/desktop.
+	landing_route() {
+		const route = frappe.boot.apps_data?.landing_route;
+		if (!route || !frappe.boot.setup_complete) return null;
+
+		const segment = this.strip_prefix(route).replace(/\/$/, "");
+		const kind = this.segment_kind(this.decode_component(segment));
+		return ["workspace", "page"].includes(kind) ? "/desk/" + segment : null;
+	},
+
+	// For a cold load of /desk, or Back to it. Replaced, not pushed, so Back does not bounce here.
+	open_landing_route(sub_path) {
+		const landing_route = this.landing_route();
+		if (sub_path || !landing_route) return false;
+
+		frappe.route_flags.replace_route = true;
+		frappe.set_route(landing_route);
+		return true;
+	},
+
 	re_route(sub_path) {
 		if (frappe.re_route[sub_path] !== undefined) {
 			// after saving a doc, for example,
@@ -690,7 +712,7 @@ frappe.router = {
 		}
 
 		if (params.length == 0) {
-			return "/desk";
+			return this.landing_route() || "/desk";
 		}
 		// Resolution order
 		// 1. User's default workspace in user doctype
@@ -699,7 +721,7 @@ frappe.router = {
 		// 4. First workspace in list of current app
 		// 5. First workspace in list
 
-		return "/desk";
+		return this.landing_route() || "/desk";
 	},
 
 	/**
