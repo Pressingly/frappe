@@ -231,7 +231,8 @@ frappe.ui.SidebarHeader = class SidebarHeader {
 		return items;
 	}
 
-	// The apps screen, which is where both shells' headers have always pointed.
+	// The apps screen. Named explicitly, since the headers' `/desk` opens the default app's home
+	// when one is set.
 	all_apps_item() {
 		return {
 			name: "all-apps",

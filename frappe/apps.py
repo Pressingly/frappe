@@ -98,8 +98,12 @@ def get_default_path():
 	if len(_apps) == 0:
 		return None
 
-	if default_app := get_default_app():
-		return get_route(default_app)
+	system_default_app = frappe.get_system_settings("default_app")
+	user_default_app = frappe.get_cached_value("User", frappe.session.user, "default_app")
+	if system_default_app and not user_default_app:
+		return get_route(system_default_app)
+	elif user_default_app:
+		return get_route(user_default_app)
 
 	if len(_apps) == 1:
 		return _apps[0].get("route") or "/desk"
@@ -160,7 +164,7 @@ def has_content(workspace: dict) -> bool:
 	try:
 		blocks = get_desktop_page(frappe.as_json(workspace))
 	except Exception:
-		frappe.log_error(f"Failed to build workspace {workspace.name} for the desk landing route")
+		frappe.logger("desk").exception(f"Failed to build workspace {workspace.name} for the landing route")
 		return False
 	return any(block.get("items") for block in blocks.values())
 
