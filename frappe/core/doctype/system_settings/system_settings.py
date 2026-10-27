@@ -182,7 +182,9 @@ class SystemSettings(Document):
 			)
 
 	def validate_user_pass_login(self):
-		if not self.disable_user_pass_login:
+		from frappe.mpass_sso import sso_enabled
+
+		if not self.disable_user_pass_login or sso_enabled():
 			return
 
 		social_login_enabled = frappe.db.exists("Social Login Key", {"enable_social_login": 1})

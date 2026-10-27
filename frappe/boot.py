@@ -25,6 +25,7 @@ from frappe.integrations.frappe_providers.cloud_settings import (
 )
 from frappe.integrations.frappe_providers.frappecloud_billing import current_site_info, is_fc_site
 from frappe.model.document import get_controller
+from frappe.mpass_sso import logout_redirect_url
 from frappe.utils import add_user_info, get_system_timezone
 from frappe.utils.caching import redis_cache
 from frappe.utils.change_log import get_versions
@@ -121,6 +122,7 @@ def get_bootinfo():
 	bootinfo.doctype_ptype_map = get_doctype_ptype_map()
 	bootinfo.subscription_conf = add_subscription_conf()
 	bootinfo.is_fc_site = is_fc_site()
+	bootinfo.mpass_logout_url = logout_redirect_url()
 	bootinfo.cloud_settings = get_cloud_settings_boot_context()
 	bootinfo.enable_address_autocompletion = frappe.db.get_single_value(
 		"Geolocation Settings", "enable_address_autocompletion"

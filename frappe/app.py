@@ -403,7 +403,8 @@ def handle_exception(e):
 		response = ErrorPage(
 			http_status_code=http_status_code,
 			title=_("Not Permitted"),
-			message=_("You do not have enough permissions to complete the action"),
+			message=getattr(e, "page_message", None)
+			or _("You do not have enough permissions to complete the action"),
 		).render()
 
 	elif http_status_code == 404:

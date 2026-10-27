@@ -1032,6 +1032,9 @@ def update_password(
 	    key (str, optional): Password reset key. Defaults to None.
 	    old_password (str, optional): Old password. Defaults to None.
 	"""
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
 
 	if len(new_password) > MAX_PASSWORD_SIZE:
 		frappe.throw(_("Password size exceeded the maximum allowed size."))
@@ -1245,6 +1248,10 @@ def sign_up(email: str, full_name: str, redirect_to: str) -> tuple[int, str]:
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 @rate_limit(limit=get_password_reset_limit, seconds=60 * 60)
 def reset_password(user: str) -> None:
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
+
 	# Always return the same generic response regardless of whether the user
 	# exists, is disabled, or is restricted. This prevents username enumeration
 	# via different messages or HTTP status codes (CWE-204).

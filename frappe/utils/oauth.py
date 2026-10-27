@@ -166,11 +166,17 @@ def get_redirect_uri(provider: str) -> str:
 
 
 def login_via_oauth2(provider: str, code: str, state: str, decoder: Callable | None = None):
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
 	info = get_info_via_oauth(provider, code, decoder)
 	login_oauth_user(info, provider=provider, state=state)
 
 
 def login_via_oauth2_id_token(provider: str, code: str, state: str, decoder: Callable | None = None):
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
 	info = get_info_via_oauth(provider, code, decoder, id_token=True)
 	login_oauth_user(info, provider=provider, state=state)
 
@@ -222,6 +228,10 @@ def login_oauth_user(
 	state: str,
 	generate_login_token: bool = False,
 ):
+	from frappe.mpass_sso import guard_local_credentials
+
+	guard_local_credentials()
+
 	if isinstance(data, str):
 		data = json.loads(data)
 
