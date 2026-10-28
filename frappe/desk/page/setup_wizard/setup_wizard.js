@@ -689,9 +689,13 @@ frappe.setup.utils = {
 					frappe.wizard.values.language =
 						frappe.wizard.values.language || r.message.language;
 
+					const prefill_user =
+						frappe.session.user === "Administrator"
+							? { name: ["not in", ["Administrator", "Guest"]] }
+							: { name: frappe.session.user };
 					frappe.db.get_value(
 						"User",
-						{ name: ["not in", ["Administrator", "Guest"]] },
+						prefill_user,
 						["full_name", "email"],
 						(r) => {
 							if (r) {
