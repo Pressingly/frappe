@@ -66,7 +66,7 @@ def setup_complete(args: str | dict[str, Any]):
 			if frappe.is_setup_complete():
 				return {"status": "ok"}
 
-			kwargs = parse_args(sanitize_input(args))
+			kwargs = bind_identity_to_session(parse_args(sanitize_input(args)))
 			stages = get_setup_stages(kwargs)
 			return process_setup_stages(stages, kwargs)
 	except LockTimeoutError:
@@ -94,8 +94,17 @@ def initialize_system_settings_and_user(
 	)
 	system_settings.save()
 
-	user_data = parse_args(sanitize_input(user_data))
+	user_data = bind_identity_to_session(parse_args(sanitize_input(user_data)))
 	create_or_update_user(user_data)
+
+
+def bind_identity_to_session(args: dict) -> frappe._dict:
+	"""The wizard renames the account it is given and logs it in. Only Administrator, handing the
+	site to its first real user, may name another account; anyone else gets their own, whatever
+	the client sent, so the wizard can never rename or log in as a different user."""
+	if frappe.session.user == "Administrator" or not args.get("email"):
+		return frappe._dict(args)
+	return frappe._dict(args, email=frappe.session.user)
 
 
 def process_setup_stages(stages, user_input, is_background_task=False):
