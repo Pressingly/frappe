@@ -6,6 +6,8 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from redis.exceptions import LockError
+
 import frappe
 from frappe.auth import CookieManager, LoginManager
 from frappe.mpass_sso import (
@@ -239,6 +241,29 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		self.assertEqual([r.role for r in user.roles], [MEMBER_ROLE])
 		self.assertNotIn("message", frappe.local.response)
 		self.assertTrue(frappe.session.data.csrf_token)
+
+	def test_login_runs_under_a_per_user_lock(self):
+		taken = []
+		real_lock = frappe.cache.lock
+
+		def recording_lock(name, **kwargs):
+			taken.append(name)
+			return real_lock(name, **kwargs)
+
+		with patch.object(frappe.cache, "lock", side_effect=recording_lock):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(taken, [f"mpass_sso:login:{self.jane}"])
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_login_waits_for_a_login_of_the_same_user_in_flight(self):
+		in_flight = frappe.cache.lock(f"mpass_sso:login:{self.jane}", timeout=10)
+		self.assertTrue(in_flight.acquire(blocking=False))
+		try:
+			with patch("frappe.mpass_sso.LOGIN_LOCK_SECONDS", 1), self.assertRaises(LockError):
+				self.apply(self.start_request(self.jane))
+		finally:
+			in_flight.release()
 
 	def test_bare_mpass_id_uses_default_domain(self):
 		self.apply(self.start_request("1020010000019120"))
