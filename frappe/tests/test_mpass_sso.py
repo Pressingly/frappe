@@ -291,6 +291,21 @@ class TestMpassProxyLogin(IntegrationTestCase):
 
 		self.assertEqual(frappe.session.user, self.jane)
 
+	def test_login_that_outlives_its_lock_still_completes(self):
+		real_login_as = LoginManager.login_as
+
+		def slow_login_as(login_manager, user):
+			time.sleep(0.3)
+			return real_login_as(login_manager, user)
+
+		with (
+			patch("frappe.mpass_sso.LOGIN_LOCK_TTL_SECONDS", 0.1),
+			patch.object(LoginManager, "login_as", slow_login_as),
+		):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(frappe.session.user, self.jane)
+
 	def test_lock_is_released_when_the_login_fails(self):
 		with (
 			patch.object(LoginManager, "login_as", side_effect=RuntimeError),

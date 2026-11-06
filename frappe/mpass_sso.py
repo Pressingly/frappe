@@ -18,6 +18,7 @@ from typing import NoReturn
 from urllib.parse import urlparse
 
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import LockError
 from redis.lock import Lock
 
 import frappe
@@ -362,7 +363,6 @@ def acquire_login_lock(user: str) -> Lock | None:
 		login_lock_key(user),
 		timeout=LOGIN_LOCK_TTL_SECONDS,
 		blocking_timeout=LOGIN_LOCK_WAIT_SECONDS,
-		raise_on_release_error=False,
 	)
 	try:
 		if lock.acquire():
@@ -376,7 +376,8 @@ def acquire_login_lock(user: str) -> Lock | None:
 def release_login_lock(lock: Lock | None) -> None:
 	if lock is None:
 		return
-	with suppress(RedisConnectionError):
+	# LockError: the lock expired during a slow login, after the login committed.
+	with suppress(RedisConnectionError, LockError):
 		lock.release()
 
 
