@@ -10,11 +10,16 @@ import binascii
 import hmac
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 from urllib.parse import urlparse
+
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import LockError
+from redis.lock import Lock
 
 import frappe
 from frappe import _
@@ -30,6 +35,8 @@ PRIVILEGED_ROLES = frozenset(("System Manager", *AUTOMATIC_ROLES))
 MIN_EDGE_SECRET_LENGTH = 32
 MAX_EMAIL_LENGTH = 140
 MAX_TOKEN_PAYLOAD_LENGTH = 8192
+LOGIN_LOCK_TTL_SECONDS = 60
+LOGIN_LOCK_WAIT_SECONDS = 10
 LOGIN_RESPONSE_KEYS = ("message", "home_page", "full_name", "redirect_to", "session_expired")
 
 
@@ -315,13 +322,63 @@ def switch_session(login_manager, user: str) -> None:
 	redirect afterwards; this request continues, so the login response keys are dropped."""
 	if user == frappe.session.user:
 		return
-	if frappe.session.user != "Guest":
-		end_session(login_manager, reason="mPass identity changed")
 
-	login_manager.login_as(user)
-	issue_csrf_token()
-	frappe.db.commit()
+	with logins_serialised_for(user):
+		if frappe.session.user != "Guest":
+			end_session(login_manager, reason="mPass identity changed")
+
+		login_manager.login_as(user)
+		issue_csrf_token()
+		frappe.db.commit()
 	drop_login_response_keys()
+
+
+@contextmanager
+def logins_serialised_for(user: str) -> Iterator[None]:
+	"""Run one login of `user` at a time, each on a fresh database snapshot.
+
+	A page's first requests arrive in parallel, each without a session, so each logs the same user
+	in and updates the same User row. Under MariaDB's snapshot isolation the later update fails
+	with 1020 ("Record has changed since last read"), which rolls the whole transaction back, so
+	upstream's `savepoint(QueryDeadlockError)` around it then fails with "SAVEPOINT does not
+	exist". login_as commits part-way, so a row lock would not hold across it: the lock is in
+	Redis, and the commit after taking it ends the snapshot this request read before waiting.
+
+	Best effort, like the rest of frappe's cache: without Redis, or after waiting too long, the
+	login runs unserialised rather than failing."""
+	lock = acquire_login_lock(user)
+	try:
+		frappe.db.commit()
+		yield
+	finally:
+		release_login_lock(lock)
+
+
+def login_lock_key(user: str) -> bytes:
+	return frappe.cache.make_key(f"mpass_sso:login:{user}")
+
+
+def acquire_login_lock(user: str) -> Lock | None:
+	lock = frappe.cache.lock(
+		login_lock_key(user),
+		timeout=LOGIN_LOCK_TTL_SECONDS,
+		blocking_timeout=LOGIN_LOCK_WAIT_SECONDS,
+	)
+	try:
+		if lock.acquire():
+			return lock
+		frappe.logger("mpass_sso").warning("login lock wait timed out; logging in unserialised")
+	except RedisConnectionError:
+		frappe.logger("mpass_sso").warning("Redis cache unreachable; logging in unserialised")
+	return None
+
+
+def release_login_lock(lock: Lock | None) -> None:
+	if lock is None:
+		return
+	# LockError: the lock expired during a slow login, after the login committed.
+	with suppress(RedisConnectionError, LockError):
+		lock.release()
 
 
 def issue_csrf_token() -> None:

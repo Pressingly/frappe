@@ -3,8 +3,12 @@
 import base64
 import json
 import os
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 import frappe
 from frappe.auth import CookieManager, LoginManager
@@ -25,6 +29,7 @@ from frappe.mpass_sso import (
 	from_edge,
 	inspects_request,
 	is_email_shaped,
+	login_lock_key,
 	normalise,
 	portal_url,
 	resolve_email,
@@ -239,6 +244,76 @@ class TestMpassProxyLogin(IntegrationTestCase):
 		self.assertEqual([r.role for r in user.roles], [MEMBER_ROLE])
 		self.assertNotIn("message", frappe.local.response)
 		self.assertTrue(frappe.session.data.csrf_token)
+
+	def hold_login_lock(self, user: str):
+		lock = frappe.cache.lock(login_lock_key(user), timeout=10, thread_local=False)
+		self.assertTrue(lock.acquire(blocking=False))
+		self.addCleanup(lambda: lock.owned() and lock.release())
+		return lock
+
+	def test_login_runs_under_a_site_scoped_per_user_lock(self):
+		taken = []
+		real_lock = frappe.cache.lock
+
+		def recording_lock(name, **kwargs):
+			taken.append(name)
+			return real_lock(name, **kwargs)
+
+		with patch.object(frappe.cache, "lock", side_effect=recording_lock):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(taken, [f"{frappe.conf.db_name}|mpass_sso:login:{self.jane}".encode()])
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_waiting_login_completes_once_the_login_in_flight_ends(self):
+		in_flight = self.hold_login_lock(self.jane)
+		threading.Timer(0.3, in_flight.release).start()
+
+		started = time.monotonic()
+		self.apply(self.start_request(self.jane))
+
+		self.assertGreaterEqual(time.monotonic() - started, 0.3)
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_login_goes_ahead_after_the_wait_times_out(self):
+		self.hold_login_lock(self.jane)
+
+		with patch("frappe.mpass_sso.LOGIN_LOCK_WAIT_SECONDS", 0.2):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_login_goes_ahead_when_redis_is_unreachable(self):
+		unreachable = SimpleNamespace(acquire=lambda: (_ for _ in ()).throw(RedisConnectionError()))
+
+		with patch.object(frappe.cache, "lock", return_value=unreachable):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_login_that_outlives_its_lock_still_completes(self):
+		real_login_as = LoginManager.login_as
+
+		def slow_login_as(login_manager, user):
+			time.sleep(0.3)
+			return real_login_as(login_manager, user)
+
+		with (
+			patch("frappe.mpass_sso.LOGIN_LOCK_TTL_SECONDS", 0.1),
+			patch.object(LoginManager, "login_as", slow_login_as),
+		):
+			self.apply(self.start_request(self.jane))
+
+		self.assertEqual(frappe.session.user, self.jane)
+
+	def test_lock_is_released_when_the_login_fails(self):
+		with (
+			patch.object(LoginManager, "login_as", side_effect=RuntimeError),
+			self.assertRaises(RuntimeError),
+		):
+			self.apply(self.start_request(self.jane))
+
+		self.assertFalse(frappe.cache.lock(login_lock_key(self.jane)).locked())
 
 	def test_bare_mpass_id_uses_default_domain(self):
 		self.apply(self.start_request("1020010000019120"))
